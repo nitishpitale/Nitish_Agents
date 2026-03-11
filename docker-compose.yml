@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  # Main volatility mispricing engine API
+  vol-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vol-engine
+    ports:
+      - "8000:8000"
+    environment:
+      # Use mock client (set to false and provide ETORO_API_KEY for production)
+      - ETORO_USE_MOCK=true
+      # Optional: provide a real OpenAI key for live LLM rationale
+      # - OPENAI_API_KEY=sk-...
+      # Use mock LLM in dev (override with "openai" for production)
+      - LLM_PROVIDER=mock
+      - LOG_LEVEL=INFO
+      - ENV=development
+    volumes:
+      - vol-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  vol-data:
+    driver: local

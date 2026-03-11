@@ -1,0 +1,81 @@
+# Volatility Mispricing Engine - Configuration
+# All thresholds and weights are overridable via environment variables.
+
+app:
+  name: "volatility-mispricing-engine"
+  version: "1.0.0"
+  environment: "development"  # development | production
+  log_level: "INFO"
+
+etoro:
+  # Set ETORO_API_KEY and ETORO_BASE_URL as env vars in production
+  base_url: "https://public-api.etoro.com"
+  api_key: ""  # injected via ETORO_API_KEY env var
+  timeout_seconds: 30
+  # Use mock client for tests / development
+  use_mock: true
+
+universe:
+  # Default tickers to scan; override via POST /run body
+  tickers:
+    - "AAPL"
+    - "MSFT"
+    - "AMZN"
+    - "GOOGL"
+    - "TSLA"
+    - "NVDA"
+    - "META"
+    - "SPY"
+    - "QQQ"
+    - "IWM"
+
+risk_free_rate: 0.045  # 4.5% annualised; override as needed
+
+realized_vol:
+  window_20d: 20
+  window_60d: 60
+  ewma_lambda: 0.94
+  # Blend weights: [20d, 60d, ewma] - must sum to 1.0
+  blend_weights: [0.25, 0.25, 0.50]
+
+filters:
+  max_bid_ask_spread_pct: 0.10   # 10% of mid
+  min_open_interest: 200
+  min_days_to_expiry: 3
+  max_days_to_expiry: 180
+
+scoring:
+  top_n: 20
+  slippage_factor: 0.001  # slippage_proxy = slippage_factor * mid
+
+phase2:
+  enabled: true
+  momentum_window: 20         # days for return percentile
+  earnings_penalty_days: 14   # penalise if earnings within N days
+  news_sentiment_enabled: false
+  weights:
+    base_score: 0.70
+    momentum: 0.15
+    earnings_penalty: -0.10
+    sentiment: 0.05
+
+llm:
+  provider: "openai"           # openai | mock
+  model: "gpt-4o-mini"
+  max_tokens: 300
+  temperature: 0.2
+  # Set OPENAI_API_KEY as env var in production
+  api_key: ""
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+
+scheduler:
+  enabled: false
+  cron: "0 18 * * 1-5"  # 18:00 UTC on market days (Mon-Fri)
+
+persistence:
+  results_dir: "./data/results"
+  run_hashes_file: "./data/run_hashes.json"

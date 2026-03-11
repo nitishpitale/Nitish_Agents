@@ -1,0 +1,29 @@
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+    \.git
+  | \.venv
+  | __pycache__
+)/
+'''
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501", "B008", "SIM108"]
+exclude = [".git", ".venv", "__pycache__"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = false
+ignore_missing_imports = true
+warn_return_any = false
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
