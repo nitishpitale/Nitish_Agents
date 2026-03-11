@@ -1,5 +1,8 @@
 """
-Main orchestration engine.  Ties together ingest → filter → score → LLM rationale.
+Main orchestration engine.
+
+Pipeline:
+  ingest → Phase 1 scoring → [news enrichment] → Phase 2 overlay → LLM rationale
 
 This module is the single entry point for a run.  The API and scheduler both call
 `run_engine(...)`.  All inputs are explicit — no global state.
@@ -22,6 +25,16 @@ from .ingest.etoro_client import EToroClient
 from .ingest.mock_client import MockEToroClient
 from .ingest.models import HistoricalPrices, OptionContract
 from .llm.rationale import LLMProvider, generate_daily_summary, generate_rationale
+from .news import (
+    NewsCache,
+    NewsFeatures,
+    NewsRunStats,
+    adjustment_summary,
+    compute_news_score_adjustment,
+    extract_news_features,
+    get_provider,
+)
+from .news.schemas import NormalizedNewsItem
 from .scoring.scorer import CandidateResult, score_candidates
 
 log = structlog.get_logger(__name__)
@@ -214,7 +227,7 @@ def run_engine(
             except Exception as exc:
                 log.warning("phase2.data_error", ticker=ticker, error=str(exc))
 
-    # --- Score ---
+    # --- Phase 1 Score ---
     candidates = score_candidates(
         contracts=all_contracts,
         historical_prices=historical_prices,
@@ -228,7 +241,25 @@ def run_engine(
         earnings_data=earnings_data if settings.phase2.enabled else None,
     )
 
-    # --- LLM rationale ---
+    # --- News Pipeline (between Phase 1 and final ranking) ---
+    news_stats = NewsRunStats(provider=settings.news.provider)
+    if settings.news.enabled and candidates:
+        candidates, news_stats = _run_news_pipeline(
+            candidates=candidates,
+            as_of=as_of,
+            settings=settings,
+            news_provider_override=None,
+        )
+        # Re-sort by news_adjusted_score (highest wins)
+        candidates.sort(
+            key=lambda c: c.news_adjusted_score if c.news_adjusted_score is not None
+            else (c.phase2_score if c.phase2_score is not None else c.score),
+            reverse=True,
+        )
+        for rank, cand in enumerate(candidates, start=1):
+            cand.rank = rank
+
+    # --- LLM rationale (news-aware) ---
     llm_provider = LLMProvider(settings.llm.provider)
     llm_api_key = settings.llm.api_key or os.getenv("OPENAI_API_KEY", "")
 
@@ -271,9 +302,17 @@ def run_engine(
         "ingest_errors": ingest_errors,
         "runtime_seconds": round(elapsed, 3),
         "phase2_enabled": settings.phase2.enabled,
+        "news_enabled": settings.news.enabled,
+        "news_provider": news_stats.provider,
+        "news_articles_fetched": news_stats.total_articles,
+        "news_cache_hit_ratio": round(news_stats.cache_hit_ratio, 3),
+        "news_llm_calls": news_stats.llm_calls,
     }
 
-    log.info("engine.complete", **stats)
+    log.info(
+        "engine.complete",
+        **{k: v for k, v in stats.items() if not isinstance(v, list)},
+    )
 
     result = RunResult(
         run_id=run_id,
@@ -292,3 +331,158 @@ def run_engine(
         log.error("engine.persist_error", error=str(exc))
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# News pipeline helper
+# ---------------------------------------------------------------------------
+
+
+def _run_news_pipeline(
+    candidates: List[CandidateResult],
+    as_of: date,
+    settings: Settings,
+    news_provider_override=None,
+) -> tuple[List[CandidateResult], NewsRunStats]:
+    """
+    Fetch news, extract features, apply deterministic score multipliers.
+
+    Steps:
+      1. Collect unique tickers from top K Phase-1 candidates.
+      2. Fetch and cache articles per ticker.
+      3. LLM extracts NewsFeatures (structured JSON, no math).
+      4. Deterministic code maps features → score multiplier.
+      5. Apply multiplier: news_adjusted_score = pre_news_score * multiplier.
+
+    Returns updated candidates list and NewsRunStats.
+    """
+    news_cfg = settings.news
+    stats = NewsRunStats(provider=news_cfg.provider)
+    api_calls_used = 0
+
+    # Build (or reuse injected) provider
+    if news_provider_override is not None:
+        provider = news_provider_override
+    else:
+        try:
+            provider_kwargs: dict = {}
+            if news_cfg.provider == "fmp":
+                provider_kwargs["api_key"] = os.getenv("FMP_API_KEY", "")
+            elif news_cfg.provider == "finnhub":
+                provider_kwargs["api_key"] = os.getenv("FINNHUB_API_KEY", "")
+            elif news_cfg.provider == "financial_datasets":
+                provider_kwargs["api_key"] = os.getenv("FINANCIAL_DATASETS_API_KEY", "")
+            provider = get_provider(news_cfg.provider, **provider_kwargs)
+        except Exception as exc:
+            log.error("news.provider_init_error", error=str(exc))
+            return candidates, stats
+
+    cache = NewsCache(cache_dir=news_cfg.cache_dir)
+
+    # Collect unique tickers from top K candidates
+    top_k_candidates = candidates[: news_cfg.top_k_for_news]
+    unique_tickers = list(dict.fromkeys(c.ticker for c in top_k_candidates))
+
+    # Fetch and extract features per ticker
+    ticker_articles: Dict[str, List[NormalizedNewsItem]] = {}
+    ticker_features: Dict[str, NewsFeatures] = {}
+
+    for ticker in unique_tickers:
+        if api_calls_used >= news_cfg.max_api_calls_per_run:
+            log.warning("news.rate_limit_reached", ticker=ticker)
+            stats.errors.append(f"rate limit reached before {ticker}")
+            break
+
+        # Check cache first
+        cached = cache.get(ticker, as_of, news_cfg.lookback_hours)
+        if cached is not None:
+            articles = cached
+            stats.cache_hits += 1
+        else:
+            try:
+                articles = provider.fetch_news(
+                    ticker=ticker,
+                    as_of=as_of,
+                    lookback_hours=news_cfg.lookback_hours,
+                    max_articles=news_cfg.max_articles_per_ticker,
+                )
+                cache.set(ticker, as_of, news_cfg.lookback_hours, articles)
+                stats.cache_misses += 1
+                api_calls_used += 1
+            except Exception as exc:
+                log.error("news.fetch_error", ticker=ticker, error=str(exc))
+                stats.errors.append(f"fetch {ticker}: {exc}")
+                articles = []
+                stats.cache_misses += 1
+
+        ticker_articles[ticker] = articles
+        stats.total_articles += len(articles)
+        stats.tickers_fetched += 1
+
+        # Extract features via LLM (or mock)
+        try:
+            llm_api_key = os.getenv("OPENAI_API_KEY", settings.llm.api_key or "")
+            features = extract_news_features(
+                ticker=ticker,
+                articles=articles,
+                ref_date=as_of,
+                provider=news_cfg.llm_provider,
+                model=news_cfg.llm_model,
+                api_key=llm_api_key,
+                max_tokens=news_cfg.llm_max_tokens,
+                temperature=news_cfg.llm_temperature,
+            )
+            ticker_features[ticker] = features
+            if news_cfg.llm_provider == "openai" and llm_api_key:
+                stats.llm_calls += 1
+        except Exception as exc:
+            log.error("news.features_error", ticker=ticker, error=str(exc))
+            stats.errors.append(f"features {ticker}: {exc}")
+
+    # Apply news multipliers to candidates
+    for candidate in candidates:
+        ticker = candidate.ticker
+        articles = ticker_articles.get(ticker, [])
+        features = ticker_features.get(ticker)
+
+        candidate.news_article_count = len(articles)
+        candidate.news_top_headlines = [a.title for a in articles[:3]]
+
+        if features is not None:
+            candidate.news_features = features.model_dump(mode="json")
+
+            multiplier = compute_news_score_adjustment(
+                features=features,
+                option_type=candidate.type,
+                alpha_sentiment=news_cfg.alpha_sentiment,
+                alpha_catalyst=news_cfg.alpha_catalyst,
+                beta_risk=news_cfg.beta_risk,
+                event_risk_mode=news_cfg.event_risk_mode,
+            )
+            candidate.news_score_multiplier = round(multiplier, 4)
+
+            # Compute final score: apply multiplier to phase2 (or phase1) score
+            pre_score = candidate.phase2_score if candidate.phase2_score is not None else candidate.score
+            candidate.news_adjusted_score = round(pre_score * multiplier, 6)
+
+            # Add adjustment metadata
+            candidate.metadata.update(
+                adjustment_summary(features, multiplier, candidate.type)
+            )
+
+            # Propagate earnings risk into the risks list (avoid duplication)
+            if features.has_earnings_risk():
+                earn_risk = "earnings risk flagged in news"
+                if earn_risk not in candidate.risks:
+                    candidate.risks.append(earn_risk)
+
+    log.info(
+        "news.pipeline_complete",
+        tickers=len(unique_tickers),
+        total_articles=stats.total_articles,
+        cache_hit_ratio=round(stats.cache_hit_ratio, 3),
+        llm_calls=stats.llm_calls,
+        errors=len(stats.errors),
+    )
+
+    return candidates, stats

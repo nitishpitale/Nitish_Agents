@@ -101,8 +101,16 @@ class TestEngineRun:
             assert candidate.rank == i, f"Expected rank {i}, got {candidate.rank}"
 
     def test_scores_are_descending(self, run_result):
-        """Candidates must be sorted by score (or phase2_score) descending."""
-        scores = [c.phase2_score or c.score for c in run_result.candidates]
+        """Candidates must be sorted by final effective score descending.
+        Priority: news_adjusted_score > phase2_score > score."""
+        def effective_score(c):
+            if c.news_adjusted_score is not None:
+                return c.news_adjusted_score
+            if c.phase2_score is not None:
+                return c.phase2_score
+            return c.score
+
+        scores = [effective_score(c) for c in run_result.candidates]
         for i in range(len(scores) - 1):
             assert scores[i] >= scores[i + 1], (
                 f"Score not descending at rank {i+1}: {scores[i]} < {scores[i+1]}"

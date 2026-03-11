@@ -79,3 +79,37 @@ scheduler:
 persistence:
   results_dir: "./data/results"
   run_hashes_file: "./data/run_hashes.json"
+
+# ─── News Pipeline ───────────────────────────────────────────────────────────
+news:
+  enabled: true
+  # News provider: fmp | financial_datasets | finnhub | mock
+  # Set FMP_API_KEY (or FINANCIAL_DATASETS_API_KEY / FINNHUB_API_KEY) in env.
+  # Falls back to "mock" when provider API key is absent.
+  provider: "mock"
+  # Number of top Phase-1 candidates to enrich with news (keep small for cost)
+  top_k_for_news: 50
+  lookback_hours: 72
+  max_articles_per_ticker: 20
+  # Path for per-run news article cache (keyed by ticker+date+lookback)
+  cache_dir: "./data/news_cache"
+
+  # Score adjustment parameters (all deterministic code — not LLM)
+  # alpha_sentiment: multiplier strength for overall sentiment signal
+  alpha_sentiment: 0.15
+  # alpha_catalyst: multiplier strength for per-catalyst directional effect
+  alpha_catalyst: 0.10
+  # beta_risk: penalty/boost strength for each risk flag
+  beta_risk: 0.20
+  # event_risk_mode: "avoid" penalises earnings risk; "seek" boosts it
+  event_risk_mode: "avoid"
+
+  # LLM provider for feature extraction (openai | mock)
+  # Set OPENAI_API_KEY for openai; falls back to "mock" without a key.
+  llm_provider: "mock"
+  llm_model: "gpt-4o-mini"
+  llm_max_tokens: 800
+  llm_temperature: 0.0
+
+  # Rate-limit: max news API calls per run (prevents hammering provider)
+  max_api_calls_per_run: 100

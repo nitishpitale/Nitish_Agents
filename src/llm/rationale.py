@@ -37,11 +37,11 @@ class LLMProvider(str, Enum):
 # ---------------------------------------------------------------------------
 
 RATIONALE_SYSTEM_PROMPT = """\
-You are a succinct trading analyst. Your role is to explain why an option is a potential candidate based on pre-computed quantitative data. You must NOT perform any mathematical calculations. All numbers are already given to you — just reference them as-is in plain English.\
+You are a succinct trading analyst. Your role is to explain why an option is a potential candidate based on pre-computed quantitative data and recent news context. You must NOT perform any mathematical calculations. All numbers are already given to you — just reference them as-is in plain English.\
 """
 
 RATIONALE_USER_TEMPLATE = """\
-Given this JSON object describing a volatility mispricing candidate, write a 2-4 sentence rationale explaining why this option is interesting. Do NOT perform any math. Refer to the numeric fields as given (e.g., "IV={iv:.2%} is low versus forecast {sigma_hat_T:.2%}"). Mention key risks. Output plain text only — no bullet points, no headers.
+Given this JSON object describing a volatility mispricing candidate, write a 2-4 sentence rationale explaining why this option is interesting. Do NOT perform any math. Refer to the numeric fields as given (e.g., "IV={iv:.2%} is low versus forecast {sigma_hat_T:.2%}"). If the news field contains catalysts or risk_flags, briefly mention the most relevant one. Mention key risks. Output plain text only — no bullet points, no headers.
 
 JSON:
 {candidate_json}
@@ -76,7 +76,7 @@ def _mock_rationale(candidate_data: Dict[str, Any]) -> str:
     """
     Generate a deterministic mock rationale without calling any LLM.
     Used in tests to validate that the rationale references numeric fields
-    without performing arithmetic.
+    without performing arithmetic.  Now includes news context when present.
     """
     ticker = candidate_data.get("ticker", "N/A")
     iv = candidate_data.get("iv", 0)
@@ -89,13 +89,38 @@ def _mock_rationale(candidate_data: Dict[str, Any]) -> str:
     opt_type = "call" if candidate_data.get("type") == "C" else "put"
     contract = candidate_data.get("contract", "")
 
-    return (
+    base = (
         f"{ticker} {opt_type} ({contract}): market IV={iv:.2%} is below the realized "
         f"vol forecast of {sigma_hat:.2%}, representing an edge_vol of {edge_vol:.2%}. "
         f"The model fair value suggests an edge_price of {edge_price:.2f} per contract, "
         f"with vega={vega:.3f} amplifying the vol-based advantage. "
         f"Bid-ask spread of {spread:.2%} is manageable given OI of {oi:,}."
     )
+
+    # Append news context if available
+    news = candidate_data.get("news") or {}
+    features = news.get("features") or {}
+    sentiment = features.get("sentiment") or {}
+    catalysts = features.get("catalysts") or []
+    risk_flags = features.get("risk_flags") or []
+    headlines = news.get("top_headlines") or []
+    multiplier = news.get("score_multiplier", 1.0)
+
+    if features:
+        sent_label = sentiment.get("label", "neutral")
+        news_note = f" News sentiment for {ticker} is {sent_label}"
+        if catalysts:
+            cat = catalysts[0]
+            news_note += f" with a {cat.get('direction', 'unclear')} {cat.get('type', 'other')} catalyst"
+        if risk_flags:
+            rf = risk_flags[0]
+            news_note += f"; note {rf.get('severity', 'med')}-severity {rf.get('type', '')} risk"
+        if headlines:
+            news_note += f'. Recent headline: "{headlines[0]}"'
+        news_note += f". News-adjusted score multiplier is {multiplier:.2f}."
+        base += news_note
+
+    return base
 
 
 def _mock_daily_summary(candidates: List[Dict[str, Any]], run_date: str) -> str:

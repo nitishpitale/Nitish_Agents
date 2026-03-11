@@ -66,7 +66,13 @@ class CandidateResult:
     # Phase 2 fields
     momentum_percentile: Optional[float] = None
     phase2_score: Optional[float] = None
-    # LLM fields (populated later)
+    # News enrichment fields (populated after Phase 1, before final ranking)
+    news_article_count: int = 0
+    news_top_headlines: List[str] = field(default_factory=list)
+    news_features: Optional[Dict] = None  # serialised NewsFeatures dict
+    news_score_multiplier: float = 1.0
+    news_adjusted_score: Optional[float] = None
+    # LLM fields (populated last)
     reason_summary: str = ""
     risks: List[str] = field(default_factory=list)
     metadata: Dict = field(default_factory=dict)
@@ -100,13 +106,27 @@ class CandidateResult:
             "reason_summary": self.reason_summary,
             "risks": self.risks,
             "metadata": self.metadata,
+            # News context block
+            "news": {
+                "article_count": self.news_article_count,
+                "top_headlines": self.news_top_headlines,
+                "features": self.news_features,
+                "score_multiplier": round(self.news_score_multiplier, 4),
+            },
         }
         if self.momentum_percentile is not None:
             d["metadata"]["momentum_percentile"] = round(self.momentum_percentile, 4)
         if self.phase2_score is not None:
-            d["score"] = round(self.phase2_score, 6)
             d["metadata"]["phase1_score"] = round(self.score, 6)
             d["metadata"]["phase2_score"] = round(self.phase2_score, 6)
+        if self.news_adjusted_score is not None:
+            d["score"] = round(self.news_adjusted_score, 6)
+            d["metadata"]["pre_news_score"] = round(
+                self.phase2_score if self.phase2_score is not None else self.score, 6
+            )
+            d["metadata"]["news_adjusted_score"] = round(self.news_adjusted_score, 6)
+        elif self.phase2_score is not None:
+            d["score"] = round(self.phase2_score, 6)
         return d
 
 

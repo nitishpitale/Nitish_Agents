@@ -93,6 +93,26 @@ class PersistenceConfig(BaseModel):
     run_hashes_file: str = "./data/run_hashes.json"
 
 
+class NewsConfig(BaseModel):
+    enabled: bool = True
+    provider: str = "mock"
+    top_k_for_news: int = 50
+    lookback_hours: int = 72
+    max_articles_per_ticker: int = 20
+    cache_dir: str = "./data/news_cache"
+    # Score adjustment parameters
+    alpha_sentiment: float = 0.15
+    alpha_catalyst: float = 0.10
+    beta_risk: float = 0.20
+    event_risk_mode: str = "avoid"
+    # LLM feature extraction
+    llm_provider: str = "mock"
+    llm_model: str = "gpt-4o-mini"
+    llm_max_tokens: int = 800
+    llm_temperature: float = 0.0
+    max_api_calls_per_run: int = 100
+
+
 class Settings(BaseModel):
     app_name: str = "volatility-mispricing-engine"
     app_version: str = "1.0.0"
@@ -111,6 +131,7 @@ class Settings(BaseModel):
     api: APIConfig = APIConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
     persistence: PersistenceConfig = PersistenceConfig()
+    news: NewsConfig = NewsConfig()
 
     @classmethod
     def from_yaml_and_env(cls) -> "Settings":
@@ -154,7 +175,38 @@ class Settings(BaseModel):
             api=APIConfig(**raw.get("api", {})),
             scheduler=SchedulerConfig(**raw.get("scheduler", {})),
             persistence=PersistenceConfig(**raw.get("persistence", {})),
+            news=_build_news_config(raw, os.getenv("OPENAI_API_KEY", "")),
         )
+
+
+def _build_news_config(raw: dict, openai_api_key: str = "") -> NewsConfig:
+    news_raw = dict(raw.get("news", {}))
+    # Override provider-specific API keys from env
+    fmp_key = os.getenv("FMP_API_KEY", "")
+    finnhub_key = os.getenv("FINNHUB_API_KEY", "")
+    fin_datasets_key = os.getenv("FINANCIAL_DATASETS_API_KEY", "")
+
+    # Auto-select provider based on available keys if not explicitly set
+    provider = news_raw.get("provider", "mock")
+    if provider != "mock":
+        # Keep configured provider; keys are passed at runtime
+        pass
+    elif fmp_key:
+        provider = "fmp"
+    elif finnhub_key:
+        provider = "finnhub"
+    elif fin_datasets_key:
+        provider = "financial_datasets"
+
+    news_raw["provider"] = os.getenv("NEWS_PROVIDER", provider)
+
+    # LLM provider for news feature extraction
+    llm_prov = news_raw.get("llm_provider", "mock")
+    if openai_api_key and llm_prov == "mock":
+        llm_prov = "openai"
+    news_raw["llm_provider"] = os.getenv("NEWS_LLM_PROVIDER", llm_prov)
+
+    return NewsConfig(**news_raw)
 
 
 @lru_cache(maxsize=1)
