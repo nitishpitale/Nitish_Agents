@@ -72,6 +72,19 @@ class ReportResponse(BaseModel):
     console_preview: str
 
 
+class TokenUpdateRequest(BaseModel):
+    access_token: str = Field(..., description="Fresh Google OAuth access token")
+    client_secret: Optional[str] = Field(None, description="OAuth client secret (enables auto-refresh)")
+
+
+class TokenStatusResponse(BaseModel):
+    valid: bool
+    expires_in_seconds: Optional[int]
+    expires_in_minutes: Optional[int]
+    scope: Optional[str]
+    auto_refresh_enabled: bool
+
+
 # ---------------------------------------------------------------------------
 # In-process state (last run cache)
 # ---------------------------------------------------------------------------
@@ -200,6 +213,108 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                         return JSONResponse(c)
 
         raise HTTPException(status_code=404, detail=f"Candidate {candidate_id!r} not found")
+
+    # ------------------------------------------------------------------
+    # POST /token  — update Google OAuth access token
+    # ------------------------------------------------------------------
+
+    @app.post("/token", response_model=TokenStatusResponse, summary="Update Google OAuth access token")
+    async def update_token(body: TokenUpdateRequest):
+        """
+        Update the persisted Google access token.
+        Optionally supply client_secret to enable auto-refresh from then on.
+        Call this after getting a fresh token from the OAuth Playground.
+        """
+        import json
+        from pathlib import Path
+        import httpx
+
+        token_file = Path("data/.google_token.json")
+        data: dict = {}
+        if token_file.exists():
+            try:
+                data = json.loads(token_file.read_text())
+            except Exception:
+                pass
+
+        data["access_token"] = body.access_token
+        if body.client_secret:
+            data["client_secret"] = body.client_secret
+
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.write_text(json.dumps(data, indent=2))
+        token_file.chmod(0o600)
+
+        # Verify the new token
+        try:
+            resp = httpx.get(
+                "https://www.googleapis.com/oauth2/v1/tokeninfo",
+                params={"access_token": body.access_token},
+                timeout=10,
+            )
+            info = resp.json()
+        except Exception:
+            info = {}
+
+        valid = "error" not in info
+        expires = int(info.get("expires_in", 0)) if valid else None
+        auto_refresh = bool(data.get("refresh_token") and data.get("client_secret"))
+
+        log.info(
+            "token.updated",
+            valid=valid,
+            expires_in=expires,
+            auto_refresh=auto_refresh,
+        )
+
+        return TokenStatusResponse(
+            valid=valid,
+            expires_in_seconds=expires,
+            expires_in_minutes=expires // 60 if expires else None,
+            scope=info.get("scope") if valid else None,
+            auto_refresh_enabled=auto_refresh,
+        )
+
+    # ------------------------------------------------------------------
+    # GET /token/status  — check current token validity
+    # ------------------------------------------------------------------
+
+    @app.get("/token/status", response_model=TokenStatusResponse, summary="Check Google OAuth token status")
+    async def token_status():
+        import json
+        from pathlib import Path
+        import httpx
+
+        token_file = Path("data/.google_token.json")
+        if not token_file.exists():
+            return TokenStatusResponse(valid=False, expires_in_seconds=None,
+                                       expires_in_minutes=None, scope=None, auto_refresh_enabled=False)
+
+        data = json.loads(token_file.read_text())
+        token = data.get("access_token", "")
+        auto_refresh = bool(data.get("refresh_token") and data.get("client_secret"))
+
+        if not token:
+            return TokenStatusResponse(valid=False, expires_in_seconds=None,
+                                       expires_in_minutes=None, scope=None, auto_refresh_enabled=auto_refresh)
+        try:
+            resp = httpx.get(
+                "https://www.googleapis.com/oauth2/v1/tokeninfo",
+                params={"access_token": token}, timeout=10,
+            )
+            info = resp.json()
+        except Exception:
+            info = {}
+
+        valid = "error" not in info
+        expires = int(info.get("expires_in", 0)) if valid else None
+        return TokenStatusResponse(
+            valid=valid,
+            expires_in_seconds=expires,
+            expires_in_minutes=expires // 60 if expires else None,
+            scope=info.get("scope") if valid else None,
+            auto_refresh_enabled=auto_refresh,
+        )
 
     # ------------------------------------------------------------------
     # POST /report  — generate report for last run + write to Google Docs

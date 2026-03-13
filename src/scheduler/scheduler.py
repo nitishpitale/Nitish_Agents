@@ -38,10 +38,80 @@ log = structlog.get_logger(__name__)
 _DEFAULT_CRON_UTC = "30 15 * * 1-5"   # Mon–Fri 15:30 UTC ≈ 7:30 AM PST
 
 
+def _ensure_google_token_valid() -> bool:
+    """
+    Before each scheduled run, check and auto-refresh the Google token if possible.
+    Returns True if a valid token is available.
+    """
+    import json
+    import requests as req
+    from pathlib import Path
+
+    token_file = Path("data/.google_token.json")
+    if not token_file.exists():
+        return False
+
+    try:
+        data = json.loads(token_file.read_text())
+        token = data.get("access_token", "")
+
+        # Check if current token is still valid (with 5-min buffer)
+        if token:
+            info = req.get(
+                "https://www.googleapis.com/oauth2/v1/tokeninfo",
+                params={"access_token": token}, timeout=10,
+            ).json()
+            if "error" not in info and int(info.get("expires_in", 0)) > 300:
+                return True
+
+        # Try auto-refresh if we have the secret
+        refresh_token = data.get("refresh_token", "")
+        client_id = data.get("client_id", "")
+        client_secret = data.get("client_secret", "")
+
+        if refresh_token and client_id and client_secret:
+            resp = req.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                },
+                timeout=15,
+            ).json()
+            if "access_token" in resp:
+                data["access_token"] = resp["access_token"]
+                token_file.write_text(json.dumps(data, indent=2))
+                log.info("scheduler.token_auto_refreshed",
+                         expires_in=resp.get("expires_in"))
+                return True
+            log.warning("scheduler.token_refresh_failed", error=resp.get("error"))
+
+        log.warning(
+            "scheduler.google_token_expired",
+            hint=(
+                "Token expired and cannot auto-refresh. "
+                "Run: python3 scripts/refresh_google_token.py "
+                "OR call POST /token with a fresh access token."
+            ),
+        )
+        return False
+    except Exception as exc:
+        log.error("scheduler.token_check_error", error=str(exc))
+        return False
+
+
 def _scheduled_run(settings: Settings) -> None:
     """Execute a full engine run and dispatch the daily report."""
     import os
     log.info("scheduler.triggered", schedule="07:30 PST")
+
+    # Ensure Google token is valid before running
+    token_ok = _ensure_google_token_valid()
+    if not token_ok:
+        log.warning("scheduler.google_token_unavailable",
+                    note="Report will be saved locally instead of Google Docs")
 
     try:
         result = run_engine(settings=settings)
