@@ -186,17 +186,33 @@ def _build_news_config(raw: dict, openai_api_key: str = "") -> NewsConfig:
     finnhub_key = os.getenv("FINNHUB_API_KEY", "")
     fin_datasets_key = os.getenv("FINANCIAL_DATASETS_API_KEY", "")
 
-    # Auto-select provider based on available keys if not explicitly set
-    provider = news_raw.get("provider", "mock")
-    if provider != "mock":
-        # Keep configured provider; keys are passed at runtime
-        pass
-    elif fmp_key:
+    # Auto-select provider based on available keys/packages if not explicitly set
+    provider = news_raw.get("provider", "yahoo_finance")
+    if provider not in ("mock", "yahoo_finance", "yahoo_finance_mcp"):
+        # Provider with required key — keep if key is present, else fall back
+        key_available = (
+            (provider == "fmp" and fmp_key)
+            or (provider == "finnhub" and finnhub_key)
+            or (provider == "financial_datasets" and fin_datasets_key)
+        )
+        if not key_available:
+            provider = "yahoo_finance"  # graceful degradation
+    elif provider == "mock":
+        pass  # explicit mock, keep
+    # Check yahoo_finance availability (yfinance must be installed)
+    if provider == "yahoo_finance":
+        try:
+            import yfinance  # noqa: F401
+        except ImportError:
+            provider = "mock"
+    if not provider and fmp_key:
         provider = "fmp"
-    elif finnhub_key:
+    elif not provider and finnhub_key:
         provider = "finnhub"
-    elif fin_datasets_key:
+    elif not provider and fin_datasets_key:
         provider = "financial_datasets"
+    elif not provider:
+        provider = "mock"
 
     news_raw["provider"] = os.getenv("NEWS_PROVIDER", provider)
 

@@ -27,6 +27,7 @@ MCP_SERVER_ALLOWLIST: Dict[str, str] = {
     "mcp-server-financialmodelingprep": ">=0.1.0",
     "financial-datasets-mcp": ">=0.1.0",
     "finance-news-mcp": ">=0.1.0",
+    "yahoo-finance-news": ">=1.0.0",   # local MCP server (mcp_servers/yahoo_finance_news)
     # Add verified servers here; anything outside this list is rejected.
 }
 

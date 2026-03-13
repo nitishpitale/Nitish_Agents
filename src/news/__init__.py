@@ -24,6 +24,7 @@ from .adjustments import compute_news_score_adjustment, adjustment_summary
 
 # Import concrete providers to trigger their registration
 from . import mcp_client  # noqa: F401
+from . import yahoo_finance  # noqa: F401
 
 __all__ = [
     "NormalizedNewsItem",

@@ -83,10 +83,17 @@ persistence:
 # ─── News Pipeline ───────────────────────────────────────────────────────────
 news:
   enabled: true
-  # News provider: fmp | financial_datasets | finnhub | mock
-  # Set FMP_API_KEY (or FINANCIAL_DATASETS_API_KEY / FINNHUB_API_KEY) in env.
-  # Falls back to "mock" when provider API key is absent.
-  provider: "mock"
+  # News provider: yahoo_finance | yahoo_finance_mcp | fmp | financial_datasets | finnhub | mock
+  #
+  # yahoo_finance      — calls yfinance directly (no API key, recommended for production)
+  # yahoo_finance_mcp  — calls the local Yahoo Finance MCP server via stdio subprocess
+  # fmp                — Financial Modeling Prep REST/MCP (requires FMP_API_KEY)
+  # financial_datasets — Financial Datasets MCP (requires FINANCIAL_DATASETS_API_KEY, stub)
+  # finnhub            — Finnhub MCP (requires FINNHUB_API_KEY, stub)
+  # mock               — deterministic synthetic data (tests / offline development)
+  #
+  # Override via NEWS_PROVIDER env var.
+  provider: "yahoo_finance"
   # Number of top Phase-1 candidates to enrich with news (keep small for cost)
   top_k_for_news: 50
   lookback_hours: 72
