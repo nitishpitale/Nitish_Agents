@@ -92,8 +92,8 @@ reporting:
   # Set GDRIVE_FOLDER_ID to create a new doc per day in a specific folder.
   # If neither is set, a new doc is created in Drive root each day.
   # Leave empty to disable Google Docs (reports saved locally instead).
-  gdrive_doc_id: ""     # injected via GDRIVE_DOC_ID env var
-  gdrive_folder_id: ""  # injected via GDRIVE_FOLDER_ID env var
+  gdrive_doc_id: "1ZcLBIM7rEY3z-e8AQxibxijHvf5FajNeEUyvFT3RLTk"
+  gdrive_folder_id: "1IuCUos6M0rWmLB6DxP8MxdbVtaEeQ1_P"
   # Local fallback directory (used when Google Drive MCP is not connected)
   local_reports_dir: "./data/reports"
 
