@@ -185,6 +185,25 @@ def run_engine(
     if client is None:
         if settings.etoro.use_mock:
             client = MockEToroClient(reference_date=as_of)
+        elif not settings.etoro.credentials_complete:
+            # Missing x-user-key or x-api-key — fall back to mock with a clear warning
+            missing = []
+            if not settings.etoro.api_key:
+                missing.append("ETORO_API_KEY")
+            if not settings.etoro.user_key:
+                missing.append("ETORO_USER_KEY")
+            log.warning(
+                "engine.credentials_incomplete",
+                missing=missing,
+                action="falling back to MockEToroClient",
+                hint=(
+                    "The eToro API requires both x-api-key (ETORO_API_KEY) and "
+                    "x-user-key (ETORO_USER_KEY). "
+                    "Generate your User Key at: "
+                    "https://api-portal.etoro.com/getting-started/authentication"
+                ),
+            )
+            client = MockEToroClient(reference_date=as_of)
         else:
             client = EToroClient(settings.etoro)
 

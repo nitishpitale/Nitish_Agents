@@ -8,11 +8,16 @@ app:
   log_level: "INFO"
 
 etoro:
-  # Set ETORO_API_KEY and ETORO_BASE_URL as env vars in production
   base_url: "https://public-api.etoro.com"
-  api_key: ""  # injected via ETORO_API_KEY env var
+  # Required credentials — inject via environment variables (never commit values):
+  #   ETORO_API_KEY  → x-api-key  (Public API Key, identifies the application)
+  #   ETORO_USER_KEY → x-user-key (User Key, identifies the account)
+  # A fresh x-request-id UUID is generated automatically per request.
+  api_key: ""   # injected via ETORO_API_KEY
+  user_key: ""  # injected via ETORO_USER_KEY
   timeout_seconds: 30
-  # Use mock client for tests / development
+  # Set false in production when both API credentials are set.
+  # Falls back to mock automatically when use_mock=true.
   use_mock: true
 
 universe:

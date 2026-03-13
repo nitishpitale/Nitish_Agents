@@ -26,9 +26,15 @@ def _load_yaml() -> dict:
 
 class EToroConfig(BaseModel):
     base_url: str = "https://public-api.etoro.com"
-    api_key: str = ""
+    api_key: str = ""    # x-api-key  — public API key, identifies the application
+    user_key: str = ""   # x-user-key — user key, identifies the account
     timeout_seconds: int = 30
     use_mock: bool = True
+
+    @property
+    def credentials_complete(self) -> bool:
+        """Both api_key and user_key must be set for live API calls."""
+        return bool(self.api_key) and bool(self.user_key)
 
 
 class UniverseConfig(BaseModel):
@@ -140,6 +146,7 @@ class Settings(BaseModel):
         # Flatten nested yaml sections into constructor kwargs
         etoro_raw = raw.get("etoro", {})
         etoro_raw["api_key"] = os.getenv("ETORO_API_KEY", etoro_raw.get("api_key", ""))
+        etoro_raw["user_key"] = os.getenv("ETORO_USER_KEY", etoro_raw.get("user_key", ""))
         etoro_raw["base_url"] = os.getenv("ETORO_BASE_URL", etoro_raw.get("base_url", "https://public-api.etoro.com"))
         use_mock_env = os.getenv("ETORO_USE_MOCK")
         if use_mock_env is not None:
