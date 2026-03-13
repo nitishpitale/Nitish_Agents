@@ -94,8 +94,15 @@ reporting:
   # Leave empty to disable Google Docs (reports saved locally instead).
   gdrive_doc_id: "1ZcLBIM7rEY3z-e8AQxibxijHvf5FajNeEUyvFT3RLTk"
   gdrive_folder_id: "1IuCUos6M0rWmLB6DxP8MxdbVtaEeQ1_P"
-  # Local fallback directory (used when Google Drive MCP is not connected)
   local_reports_dir: "./data/reports"
+
+  # ── Email delivery (Gmail App Password — permanent, never expires) ──────
+  # Set GMAIL_APP_PASSWORD + GMAIL_FROM in Cursor Secrets.
+  # The report will be emailed every morning at 7:30 AM PST.
+  # Get an App Password at: https://myaccount.google.com/apppasswords
+  gmail_from: ""      # injected via GMAIL_FROM env var
+  gmail_to: ""        # injected via GMAIL_TO env var (defaults to gmail_from)
+  gmail_app_password: ""  # injected via GMAIL_APP_PASSWORD env var
 
 persistence:
   results_dir: "./data/results"

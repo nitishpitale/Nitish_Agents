@@ -24,7 +24,8 @@ from pydantic import BaseModel, Field
 from ..config.settings import Settings, get_settings
 from ..engine import RunResult, run_engine
 from ..reporting.formatter import format_daily_report
-from ..reporting.google_docs import write_report_to_docs
+from ..reporting.google_docs import write_report_to_docs, is_google_api_available
+from ..reporting.email_reporter import send_daily_report, is_email_configured
 
 log = structlog.get_logger(__name__)
 
@@ -347,6 +348,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             run_date=_last_run.run_date,
             doc_id=doc_id,
             folder_id=folder_id,
+            candidates=_last_run.candidates,
+            daily_summary=_last_run.daily_summary,
         )
 
         return ReportResponse(

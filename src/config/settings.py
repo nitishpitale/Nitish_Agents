@@ -104,6 +104,10 @@ class ReportingConfig(BaseModel):
     gdrive_doc_id: str = ""
     gdrive_folder_id: str = ""
     local_reports_dir: str = "./data/reports"
+    # Email (Gmail App Password — permanent)
+    gmail_from: str = ""
+    gmail_to: str = ""
+    gmail_app_password: str = ""
 
 
 class NewsConfig(BaseModel):
@@ -245,6 +249,9 @@ def _build_reporting_config(raw: dict) -> ReportingConfig:
     rep_raw = dict(raw.get("reporting", {}))
     rep_raw["gdrive_doc_id"] = os.getenv("GDRIVE_DOC_ID", rep_raw.get("gdrive_doc_id", ""))
     rep_raw["gdrive_folder_id"] = os.getenv("GDRIVE_FOLDER_ID", rep_raw.get("gdrive_folder_id", ""))
+    rep_raw["gmail_from"] = os.getenv("GMAIL_FROM", rep_raw.get("gmail_from", ""))
+    rep_raw["gmail_to"] = os.getenv("GMAIL_TO", rep_raw.get("gmail_to", rep_raw.get("gmail_from", "")))
+    rep_raw["gmail_app_password"] = os.getenv("GMAIL_APP_PASSWORD", rep_raw.get("gmail_app_password", ""))
     return ReportingConfig(**rep_raw)
 
 

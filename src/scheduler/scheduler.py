@@ -28,6 +28,7 @@ from ..config.settings import Settings, get_settings
 from ..engine import run_engine
 from ..reporting.formatter import format_daily_report
 from ..reporting.google_docs import write_report_to_docs
+from ..reporting.email_reporter import send_daily_report, is_email_configured
 
 log = structlog.get_logger(__name__)
 
@@ -144,23 +145,52 @@ def _scheduled_run(settings: Settings) -> None:
     # ── Write to Google Docs ───────────────────────────────────────────────
     doc_id = os.getenv("GDRIVE_DOC_ID", settings.reporting.gdrive_doc_id)
     folder_id = os.getenv("GDRIVE_FOLDER_ID", settings.reporting.gdrive_folder_id)
+    dispatched = []
 
+    # ── 1. Google Docs (if token is valid) ────────────────────────────────
     try:
         result_doc = write_report_to_docs(
             markdown=reports["google_docs_markdown"],
             run_date=result.run_date,
             doc_id=doc_id or None,
             folder_id=folder_id or None,
+            candidates=result.candidates,
+            daily_summary=result.daily_summary,
         )
-        log.info(
-            "scheduler.report_dispatched",
-            method=result_doc["method"],
-            location=result_doc["location"],
-            message=result_doc["message"],
-        )
+        log.info("scheduler.gdocs_dispatch", **{k: v for k, v in result_doc.items() if k != "message"})
         print(result_doc["message"])
+        if result_doc["success"] and result_doc["method"] != "local_file":
+            dispatched.append("google_docs")
     except Exception as exc:
-        log.error("scheduler.report_dispatch_failed", error=str(exc), exc_info=True)
+        log.error("scheduler.gdocs_failed", error=str(exc))
+
+    # ── 2. Email (always attempted if configured — permanent credentials) ──
+    if is_email_configured():
+        try:
+            result_email = send_daily_report(
+                markdown=reports["google_docs_markdown"],
+                plain_text=reports["plain_text"],
+                run_date=result.run_date,
+            )
+            log.info("scheduler.email_dispatch", **{k: v for k, v in result_email.items() if k != "message"})
+            print(result_email["message"])
+            if result_email["success"]:
+                dispatched.append("email")
+        except Exception as exc:
+            log.error("scheduler.email_failed", error=str(exc))
+
+    if dispatched:
+        log.info("scheduler.dispatch_complete", outputs=dispatched)
+    else:
+        log.warning(
+            "scheduler.no_permanent_output",
+            hint=(
+                "Report saved locally only. For permanent daily delivery, add ONE of:\n"
+                "  GMAIL_APP_PASSWORD + GMAIL_FROM  → email (2 min setup, never expires)\n"
+                "  GOOGLE_SERVICE_ACCOUNT_JSON       → Google Docs (5 min setup, never expires)\n"
+                "See src/reporting/email_reporter.py or google_docs.py for instructions."
+            ),
+        )
 
 
 def start_scheduler(settings: Optional[Settings] = None) -> BackgroundScheduler:

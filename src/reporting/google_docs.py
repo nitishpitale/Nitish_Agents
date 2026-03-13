@@ -1,56 +1,36 @@
 """
-Google Docs writer — direct Google API + MCP fallback.
+Google Docs writer — structured table format.
+
+Output layout (matches user template):
+  ┌─────────────────────────────────────────────────────┐
+  │  Date header + Summary paragraph  (font size 11)    │
+  ├─────────────┬──────────────┬────────┬───────────────┤
+  │ Ticker name │ Call/Put +   │ Strike │  Volatility   │  ...
+  │             │ Expiry date  │ Price  │               │
+  ├─────────────┼──────────────┼────────┼───────────────┤
+  │   5 rows of candidate data (font size 8)            │
+  └─────────────────────────────────────────────────────┘
 
 Authentication priority (first available wins):
-  1. GOOGLE_SERVICE_ACCOUNT_JSON  — base64-encoded service-account key JSON
-                                    (best for fully automated cloud use)
-  2. GOOGLE_APPLICATION_CREDENTIALS — path to a service-account or OAuth JSON
-                                       key file on disk
-  3. GOOGLE_OAUTH_REFRESH_TOKEN + GOOGLE_OAUTH_CLIENT_ID +
-     GOOGLE_OAUTH_CLIENT_SECRET    — OAuth 2.0 refresh token
-                                     (get once from Google OAuth Playground)
-  4. GOOGLE_ACCESS_TOKEN           — short-lived bearer token (testing only)
-  5. gdrive MCP subprocess         — deprecated package, kept as last resort
-  6. local file fallback            — data/reports/YYYY-MM-DD_top5.md
+  1. GOOGLE_SERVICE_ACCOUNT_JSON  — base64 service-account JSON key
+  2. GOOGLE_APPLICATION_CREDENTIALS — path to key file on disk
+  3. GOOGLE_OAUTH_REFRESH_TOKEN + GOOGLE_OAUTH_CLIENT_ID + CLIENT_SECRET
+  4. GOOGLE_ACCESS_TOKEN or data/.google_token.json  (access-token file)
+  5. Local markdown file fallback
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-QUICK SETUP — OAuth Playground (2 minutes, no Cloud project needed)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. Open https://developers.google.com/oauthplayground/
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PERMANENT SETUP OPTIONS (no token refresh ever needed)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Option A — Service Account (recommended, 5 min):
+  1. console.cloud.google.com → IAM → Service Accounts → Create
+  2. Create JSON key → download
+  3. Share your Google Doc with the service account email (Editor)
+  4. Add to Cursor Secrets:
+       GOOGLE_SERVICE_ACCOUNT_JSON = $(base64 -w0 key.json)
 
-2. Click the ⚙ gear icon (top-right) → tick
-   "Use your own OAuth credentials"
-   Enter a Google Cloud OAuth 2.0 Client ID + Secret OR untick to use
-   Google's built-in playground credentials (simpler but tokens expire hourly).
-
-3. In "Step 1 – Select & authorize APIs" paste these two scopes:
-     https://www.googleapis.com/auth/documents
-     https://www.googleapis.com/auth/drive.file
-   → Click "Authorize APIs" → sign in with the account that owns the Doc.
-
-4. "Step 2 – Exchange authorization code for tokens"
-   → Click "Exchange authorization code for tokens"
-   → Copy the Refresh Token shown.
-
-5. Set Cursor Secrets (Dashboard → Cloud Agents → Secrets):
-     GOOGLE_OAUTH_REFRESH_TOKEN   = <paste refresh token>
-     GOOGLE_OAUTH_CLIENT_ID       = <your client ID>    (or Google's playground ID)
-     GOOGLE_OAUTH_CLIENT_SECRET   = <your client secret>(or Google's playground secret)
-     GDRIVE_DOC_ID                = 1ZcLBIM7rEY3z-e8AQxibxijHvf5FajNeEUyvFT3RLTk
-     GDRIVE_FOLDER_ID             = 1IuCUos6M0rWmLB6DxP8MxdbVtaEeQ1_P
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RECOMMENDED SETUP — Service Account (fully automated, token never expires)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. Go to https://console.cloud.google.com/ → IAM & Admin → Service Accounts
-2. Create a service account, give it no IAM role.
-3. Create a JSON key → download the .json file.
-4. Open your Google Doc → Share with the service account email
-   (looks like: name@project.iam.gserviceaccount.com) as Editor.
-5. Set Cursor Secret:
-     GOOGLE_SERVICE_ACCOUNT_JSON = <base64-encoded contents of the .json file>
-     (run: base64 -w0 service-account.json)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Option B — Gmail App Password (email delivery, 2 min):
+  See src/reporting/email_reporter.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 from __future__ import annotations
@@ -60,9 +40,9 @@ import base64
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, List, Optional
 
 import structlog
 
@@ -72,99 +52,91 @@ logger = logging.getLogger(__name__)
 _DOC_ID_ENV = "GDRIVE_DOC_ID"
 _FOLDER_ID_ENV = "GDRIVE_FOLDER_ID"
 _FALLBACK_DIR = Path("data/reports")
+_TOKEN_FILE = Path(os.getenv("GOOGLE_TOKEN_FILE", "data/.google_token.json"))
 
-# Google API scopes
 _SCOPES = [
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/drive.file",
 ]
 
-# Google OAuth Playground well-known client credentials (public)
-# These can only be used interactively; for automated use supply your own.
 _PLAYGROUND_CLIENT_ID = "407408718192.apps.googleusercontent.com"
-_PLAYGROUND_CLIENT_SECRET = "AI_playground_secret_placeholder"
+
+# Table column headers (matches template)
+_TABLE_HEADERS = [
+    "Ticker\nname",
+    "Call/Put +\nExpiry date",
+    "Strike\nPrice",
+    "Volatility",
+    "Pricing",
+    "Liquidity",
+    "Final score\nand Sentiment",
+]
+
+_TABLE_COLS = len(_TABLE_HEADERS)
+_TABLE_ROWS = 6  # 1 header + 5 data rows
 
 
 # ---------------------------------------------------------------------------
-# Authentication helpers
+# Authentication
 # ---------------------------------------------------------------------------
-
 
 def _build_credentials():
-    """
-    Build Google credentials from environment variables.
-    Returns a Credentials object or None if no auth is available.
-    """
+    """Build Google credentials — first available method wins."""
     from google.oauth2 import service_account
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
     from google.auth import default as gad
 
-    # ── 1. Service account JSON (base64 encoded) ─────────────────────────
+    # 1. Service account (base64 JSON env var)
     sa_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
     if sa_b64:
         try:
-            sa_json = base64.b64decode(sa_b64).decode()
-            sa_info = json.loads(sa_json)
-            creds = service_account.Credentials.from_service_account_info(
-                sa_info, scopes=_SCOPES
-            )
-            log.info("google_auth.using_service_account")
+            sa_info = json.loads(base64.b64decode(sa_b64).decode())
+            creds = service_account.Credentials.from_service_account_info(sa_info, scopes=_SCOPES)
+            log.info("google_auth.service_account")
             return creds
         except Exception as exc:
-            logger.error("google_auth: service account decode failed: %s", exc)
+            logger.error("google_auth: SA decode failed: %s", exc)
 
-    # ── 2. Application Default Credentials (GOOGLE_APPLICATION_CREDENTIALS) ─
+    # 2. Application Default Credentials (GOOGLE_APPLICATION_CREDENTIALS file)
     try:
         creds, _ = gad(scopes=_SCOPES)
         if creds:
-            log.info("google_auth.using_application_default")
+            log.info("google_auth.application_default")
             return creds
     except Exception:
         pass
 
-    # ── 3. OAuth refresh token ─────────────────────────────────────────────
+    # 3. OAuth refresh token
     refresh_token = os.getenv("GOOGLE_OAUTH_REFRESH_TOKEN", "")
     client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID", _PLAYGROUND_CLIENT_ID)
     client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
     if refresh_token and client_secret:
         try:
             creds = Credentials(
-                token=None,
-                refresh_token=refresh_token,
+                token=None, refresh_token=refresh_token,
                 token_uri="https://oauth2.googleapis.com/token",
-                client_id=client_id,
-                client_secret=client_secret,
-                scopes=_SCOPES,
+                client_id=client_id, client_secret=client_secret, scopes=_SCOPES,
             )
             creds.refresh(Request())
-            log.info("google_auth.using_oauth_refresh_token")
+            log.info("google_auth.oauth_refresh_token")
             return creds
         except Exception as exc:
             logger.error("google_auth: refresh token failed: %s", exc)
 
-    # ── 4. Short-lived access token ────────────────────────────────────────
+    # 4. Access token (env var or token file)
     access_token = os.getenv("GOOGLE_ACCESS_TOKEN", "")
-    if access_token:
+    if not access_token and _TOKEN_FILE.exists():
         try:
-            creds = Credentials(token=access_token, scopes=_SCOPES)
-            log.info("google_auth.using_access_token")
-            return creds
-        except Exception as exc:
-            logger.error("google_auth: access token failed: %s", exc)
-
-    # ── 5. Persisted token file (.google_token.json) ───────────────────────
-    token_file = Path(os.getenv("GOOGLE_TOKEN_FILE", "data/.google_token.json"))
-    if token_file.exists():
-        try:
-            with open(token_file) as f:
-                token_data = json.load(f)
-            stored_refresh = token_data.get("refresh_token", "")
-            stored_client_id = token_data.get("client_id", os.getenv("GOOGLE_OAUTH_CLIENT_ID", _PLAYGROUND_CLIENT_ID))
-            stored_client_secret = token_data.get("client_secret", os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", ""))
+            data = json.loads(_TOKEN_FILE.read_text())
+            access_token = data.get("access_token", "")
+            stored_refresh = data.get("refresh_token", "")
+            stored_client_id = data.get("client_id", _PLAYGROUND_CLIENT_ID)
+            stored_client_secret = data.get("client_secret", "")
+            # Try to auto-refresh if secret is available
             if stored_refresh and stored_client_secret:
                 creds = Credentials(
-                    token=token_data.get("access_token"),
+                    token=access_token or None,
                     refresh_token=stored_refresh,
                     token_uri="https://oauth2.googleapis.com/token",
                     client_id=stored_client_id,
@@ -173,225 +145,263 @@ def _build_credentials():
                 )
                 if not creds.valid:
                     creds.refresh(Request())
-                # Persist refreshed token
-                token_data["access_token"] = creds.token
-                with open(token_file, "w") as f:
-                    json.dump(token_data, f)
-                log.info("google_auth.using_token_file", path=str(token_file))
+                    data["access_token"] = creds.token
+                    _TOKEN_FILE.write_text(json.dumps(data, indent=2))
+                log.info("google_auth.token_file_refreshed")
                 return creds
-            elif stored_refresh:
-                # No client secret — use access token from file if present
-                stored_access = token_data.get("access_token", "")
-                if stored_access:
-                    creds = Credentials(token=stored_access, scopes=_SCOPES)
-                    log.info("google_auth.using_token_file_access_only", path=str(token_file))
-                    return creds
         except Exception as exc:
-            logger.warning("google_auth: token file load failed: %s", exc)
+            logger.warning("google_auth: token file error: %s", exc)
+
+    if access_token:
+        try:
+            creds = Credentials(token=access_token, scopes=_SCOPES)
+            log.info("google_auth.access_token")
+            return creds
+        except Exception as exc:
+            logger.error("google_auth: access token failed: %s", exc)
 
     return None
 
 
 # ---------------------------------------------------------------------------
-# Google Docs API operations
+# Data formatting helpers
 # ---------------------------------------------------------------------------
 
+def _stars(score: float) -> str:
+    if score >= 20: return "★★★★★"
+    if score >= 10: return "★★★★☆"
+    if score >= 3:  return "★★★☆☆"
+    if score >= 1:  return "★★☆☆☆"
+    return "★☆☆☆☆"
 
-def _markdown_to_docs_requests(markdown: str) -> list[dict]:
+
+def _extract_summary(daily_summary: str) -> str:
+    if not daily_summary:
+        return ""
+    if "SUMMARY:" in daily_summary:
+        text = daily_summary.split("SUMMARY:")[-1]
+        if "WATCH LIST:" in text:
+            text = text.split("WATCH LIST:")[0]
+        return text.strip()
+    return daily_summary.strip()[:400]
+
+
+def _format_candidate_row(candidate) -> List[str]:
+    """Format one CandidateResult into a 7-cell data row."""
+    d = candidate.to_dict()
+    opt_type = "CALL" if d["type"] == "C" else "PUT"
+
+    volatility = (
+        f"IV: {d['iv']*100:.2f}%\n"
+        f"Forecast: {d['sigma_hat_T']*100:.2f}%\n"
+        f"Edge Vol: {d['edge_vol']*100:+.2f}%"
+    )
+    pricing = (
+        f"Mid: ${d['market_mid']:.2f}\n"
+        f"Fair: ${d['model_fair_value']:.2f}\n"
+        f"Edge: {d['edge_price']:+.2f}"
+    )
+    liquidity = (
+        f"OI: {d['oi']:,}\n"
+        f"Vol: {d['volume']:,}\n"
+        f"Spread: {d['bid_ask_spread_pct']*100:.2f}%"
+    )
+    score = d.get("score", 0)
+    news_feat = (d.get("news") or {}).get("features") or {}
+    sentiment = (news_feat.get("sentiment") or {}).get("label", "neutral").capitalize()
+    final = f"Score: {score:.2f}\n{_stars(score)}\n{sentiment}"
+
+    return [
+        d["ticker"],
+        f"{opt_type}\n{d['expiry']}",
+        f"${d['strike']:.2f}",
+        volatility,
+        pricing,
+        liquidity,
+        final,
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Google Docs API table builder
+# ---------------------------------------------------------------------------
+
+def _find_table_cell_indices(doc: dict) -> List[List[int]]:
     """
-    Convert Markdown text to a list of Google Docs API batchUpdate requests.
-
-    Converts:
-      # Heading 1  → HEADING_1 paragraph style
-      ## Heading 2 → HEADING_2
-      ### Heading 3 → HEADING_3
-      **bold**     → bold text
-      `code`       → monospace text
-      ---          → horizontal rule (dashed line)
-      plain text   → NORMAL_TEXT
-
-    Returns a list of requests ready for documents.batchUpdate().
+    Navigate the document JSON and return cell start indices as
+    cells[row][col].  Only the first table in the document is used.
     """
-    requests = []
-    # Start index — Google Docs body starts at index 1
-    # We'll insert at the beginning (index 1) so new reports appear at top.
-    index = 1
+    cells: List[List[int]] = []
+    for element in doc.get("body", {}).get("content", []):
+        if "table" not in element:
+            continue
+        for row in element["table"].get("tableRows", []):
+            row_cells = []
+            for cell in row.get("tableCells", []):
+                cell_start = None
+                for para in cell.get("content", []):
+                    if "paragraph" in para:
+                        els = para["paragraph"].get("elements", [])
+                        cell_start = els[0]["startIndex"] if els else para.get("startIndex", 0) + 1
+                        break
+                row_cells.append(cell_start if cell_start is not None
+                                  else cell.get("startIndex", 0) + 2)
+            cells.append(row_cells)
+        break  # Only first table
+    return cells
 
-    lines = markdown.split("\n")
 
-    for line in lines:
-        text = line.rstrip()
+def _write_structured_report_to_doc(
+    creds,
+    doc_id: str,
+    candidates: list,
+    daily_summary: str,
+    date_str: str,
+) -> bool:
+    """
+    Write the structured report to Google Docs in the user-defined format:
+      - Summary paragraph at font size 11
+      - 6×7 table at font size 8 (1 header row + 5 candidate rows)
+    """
+    from googleapiclient.discovery import build
 
-        # Determine paragraph style
-        if text.startswith("### "):
-            style = "HEADING_3"
-            content = text[4:] + "\n"
-        elif text.startswith("## "):
-            style = "HEADING_2"
-            content = text[3:] + "\n"
-        elif text.startswith("# "):
-            style = "HEADING_1"
-            content = text[2:] + "\n"
-        elif text == "---":
-            content = "─" * 60 + "\n"
-            style = "NORMAL_TEXT"
-        else:
-            content = text + "\n"
-            style = "NORMAL_TEXT"
+    service = build("docs", "v1", credentials=creds, cache_discovery=False)
 
-        if not content.strip():
-            content = "\n"
+    try:
+        # ── Step 1: Clear the document body ──────────────────────────────
+        doc = service.documents().get(documentId=doc_id).execute()
+        body_content = doc.get("body", {}).get("content", [])
+        end_idx = body_content[-1].get("endIndex", 2) - 1 if body_content else 1
 
-        requests.append({
-            "insertText": {
-                "location": {"index": index},
-                "text": content,
-            }
-        })
+        if end_idx > 1:
+            service.documents().batchUpdate(
+                documentId=doc_id,
+                body={"requests": [{"deleteContentRange": {
+                    "range": {"startIndex": 1, "endIndex": end_idx}
+                }}]},
+            ).execute()
 
-        if style != "NORMAL_TEXT":
-            requests.append({
-                "updateParagraphStyle": {
-                    "range": {
-                        "startIndex": index,
-                        "endIndex": index + len(content),
+        # ── Step 2: Build summary block ───────────────────────────────────
+        summary_text = _extract_summary(daily_summary)
+        header_line = f"📈 Top 5 Volatility Mispricing — {date_str}\n"
+        body_text = f"{summary_text}\n\n" if summary_text else "\n"
+        full_header = header_line + body_text
+
+        init_requests: List[dict] = [
+            # Insert date header + summary
+            {"insertText": {"location": {"index": 1}, "text": full_header}},
+            # Summary body: font size 11, normal weight
+            {
+                "updateTextStyle": {
+                    "range": {"startIndex": 1, "endIndex": 1 + len(full_header)},
+                    "textStyle": {"fontSize": {"magnitude": 11, "unit": "PT"}},
+                    "fields": "fontSize",
+                }
+            },
+            # Header line: bold + size 12
+            {
+                "updateTextStyle": {
+                    "range": {"startIndex": 1, "endIndex": 1 + len(header_line)},
+                    "textStyle": {
+                        "bold": True,
+                        "fontSize": {"magnitude": 12, "unit": "PT"},
                     },
-                    "paragraphStyle": {"namedStyleType": style},
-                    "fields": "namedStyleType",
+                    "fields": "bold,fontSize",
+                }
+            },
+            # Insert 6×7 table immediately after the summary block
+            {
+                "insertTable": {
+                    "rows": _TABLE_ROWS,
+                    "columns": _TABLE_COLS,
+                    "location": {"index": 1 + len(full_header)},
+                }
+            },
+        ]
+        service.documents().batchUpdate(
+            documentId=doc_id, body={"requests": init_requests}
+        ).execute()
+
+        # ── Step 3: Fetch updated doc and locate all cell indices ─────────
+        doc = service.documents().get(documentId=doc_id).execute()
+        cells = _find_table_cell_indices(doc)
+
+        if not cells or len(cells) < _TABLE_ROWS:
+            logger.error("google_docs: could not locate table cells (found %d rows)", len(cells))
+            return False
+
+        # ── Step 4: Build rows ────────────────────────────────────────────
+        rows_data: List[List[str]] = [_TABLE_HEADERS]
+        for c in candidates[:5]:
+            rows_data.append(_format_candidate_row(c))
+
+        # Pad with empty rows if fewer than 5 candidates
+        while len(rows_data) < _TABLE_ROWS:
+            rows_data.append([""] * _TABLE_COLS)
+
+        # Collect (cell_index, text, is_header) sorted HIGH → LOW
+        # so later insertions don't shift earlier cell indices
+        cell_fills: List[tuple] = []
+        for row_i, row in enumerate(rows_data):
+            if row_i >= len(cells):
+                break
+            for col_i, text in enumerate(row):
+                if col_i >= len(cells[row_i]) or not text:
+                    continue
+                cell_fills.append((cells[row_i][col_i], text, row_i == 0))
+
+        cell_fills.sort(key=lambda x: x[0], reverse=True)
+
+        # ── Step 5: Fill all cells in one batchUpdate ─────────────────────
+        fill_requests: List[dict] = []
+        for cell_idx, text, is_header in cell_fills:
+            fill_requests.append({
+                "insertText": {
+                    "location": {"index": cell_idx},
+                    "text": text,
+                }
+            })
+            end = cell_idx + len(text)
+            style: dict = {"fontSize": {"magnitude": 8, "unit": "PT"}}
+            fields = "fontSize"
+            if is_header:
+                style["bold"] = True
+                fields = "bold,fontSize"
+            fill_requests.append({
+                "updateTextStyle": {
+                    "range": {"startIndex": cell_idx, "endIndex": end},
+                    "textStyle": style,
+                    "fields": fields,
                 }
             })
 
-        index += len(content)
-
-    return requests
-
-
-def _write_to_existing_doc(
-    creds, doc_id: str, markdown: str, date_str: str
-) -> bool:
-    """Prepend the report to an existing Google Doc."""
-    try:
-        from googleapiclient.discovery import build
-
-        service = build("docs", "v1", credentials=creds, cache_discovery=False)
-
-        # Get current document to find the body start index
-        doc = service.documents().get(documentId=doc_id).execute()
-        body_content = doc.get("body", {}).get("content", [])
-
-        # Build the Markdown content with date separator
-        full_markdown = f"# 📋 {date_str}\n\n{markdown}\n\n{'═' * 60}\n\n"
-        requests = _markdown_to_docs_requests(full_markdown)
-
-        if requests:
+        if fill_requests:
             service.documents().batchUpdate(
-                documentId=doc_id,
-                body={"requests": requests},
+                documentId=doc_id, body={"requests": fill_requests}
             ).execute()
 
-        log.info("google_docs.doc_updated", doc_id=doc_id)
+        log.info("google_docs.structured_report_written", doc_id=doc_id)
         return True
 
     except Exception as exc:
-        logger.error("google_docs.update_failed: %s", exc)
+        logger.error("google_docs.structured_write_failed: %s", exc, exc_info=True)
         return False
-
-
-def _create_new_doc(
-    creds, markdown: str, date_str: str, folder_id: Optional[str]
-) -> Optional[str]:
-    """Create a new Google Doc containing the report. Returns the new doc ID."""
-    try:
-        from googleapiclient.discovery import build
-
-        drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
-        docs_service = build("docs", "v1", credentials=creds, cache_discovery=False)
-
-        # Create an empty Google Doc via Drive API
-        file_metadata = {
-            "name": f"Vol Mispricing Top 5 — {date_str}",
-            "mimeType": "application/vnd.google-apps.document",
-        }
-        if folder_id:
-            file_metadata["parents"] = [folder_id]
-
-        file = drive_service.files().create(
-            body=file_metadata, fields="id"
-        ).execute()
-        new_doc_id = file.get("id")
-
-        if not new_doc_id:
-            return None
-
-        # Insert content
-        requests = _markdown_to_docs_requests(markdown)
-        if requests:
-            docs_service.documents().batchUpdate(
-                documentId=new_doc_id,
-                body={"requests": requests},
-            ).execute()
-
-        log.info("google_docs.doc_created", doc_id=new_doc_id)
-        return new_doc_id
-
-    except Exception as exc:
-        logger.error("google_docs.create_failed: %s", exc)
-        return None
 
 
 # ---------------------------------------------------------------------------
 # Local fallback
 # ---------------------------------------------------------------------------
 
-
 def _write_local_fallback(markdown: str, run_date: datetime) -> Path:
     _FALLBACK_DIR.mkdir(parents=True, exist_ok=True)
-    filename = f"{run_date.strftime('%Y-%m-%d')}_top5.md"
-    path = _FALLBACK_DIR / filename
-    with open(path, "w") as f:
-        f.write(markdown)
+    path = _FALLBACK_DIR / f"{run_date.strftime('%Y-%m-%d')}_top5.md"
+    path.write_text(markdown)
     return path
-
-
-# ---------------------------------------------------------------------------
-# Deprecated MCP fallback (last resort)
-# ---------------------------------------------------------------------------
-
-
-async def _try_mcp_create(markdown: str, date_str: str, folder_id: Optional[str]) -> Optional[str]:
-    """Try the deprecated gdrive MCP server as a last resort."""
-    try:
-        from mcp import ClientSession
-        from mcp.client.stdio import StdioServerParameters, stdio_client
-
-        server_params = StdioServerParameters(
-            command="npx",
-            args=["-y", "@modelcontextprotocol/server-gdrive"],
-            env={**os.environ},
-        )
-        async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                args: dict = {
-                    "name": f"Vol Mispricing Top 5 — {date_str}",
-                    "content": markdown,
-                    "mimeType": "application/vnd.google-apps.document",
-                }
-                if folder_id:
-                    args["parents"] = [folder_id]
-                result = await session.call_tool("gdrive_create_file", args)
-                for c in (result.content or []):
-                    if hasattr(c, "text") and c.text:
-                        return c.text
-    except Exception as exc:
-        logger.debug("MCP fallback failed: %s", exc)
-    return None
 
 
 # ---------------------------------------------------------------------------
 # Public helpers
 # ---------------------------------------------------------------------------
-
 
 def is_gdrive_mcp_available() -> bool:
     import shutil
@@ -399,14 +409,12 @@ def is_gdrive_mcp_available() -> bool:
 
 
 def is_google_api_available() -> bool:
-    """Return True if any Google auth method is configured."""
-    token_file = Path(os.getenv("GOOGLE_TOKEN_FILE", "data/.google_token.json"))
     return bool(
         os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
         or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
         or (os.getenv("GOOGLE_OAUTH_REFRESH_TOKEN") and os.getenv("GOOGLE_OAUTH_CLIENT_SECRET"))
         or os.getenv("GOOGLE_ACCESS_TOKEN")
-        or token_file.exists()
+        or _TOKEN_FILE.exists()
     )
 
 
@@ -414,21 +422,20 @@ def is_google_api_available() -> bool:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-
 def write_report_to_docs(
     markdown: str,
     run_date: datetime,
     doc_id: Optional[str] = None,
     folder_id: Optional[str] = None,
+    candidates: Optional[list] = None,
+    daily_summary: str = "",
 ) -> dict:
     """
-    Write the daily report to Google Docs.
+    Write the daily report to Google Docs in the structured table format.
 
-    Priority:
-      1. Google API (service account / OAuth) → update existing doc
-      2. Google API → create new doc in folder
-      3. MCP subprocess (deprecated, last resort)
-      4. Local file fallback
+    When `candidates` is supplied the full structured layout (summary + table)
+    is written directly via the Docs API.  Falls back to local markdown file
+    if no credentials are available.
 
     Returns dict: method, location, success, message.
     """
@@ -436,65 +443,58 @@ def write_report_to_docs(
     folder_id = folder_id or os.getenv(_FOLDER_ID_ENV, "")
     date_str = run_date.strftime("%A, %B %-d, %Y")
 
-    # ── Try Google API ─────────────────────────────────────────────────────
     creds = _build_credentials()
 
-    if creds is not None:
-        if doc_id:
-            ok = _write_to_existing_doc(creds, doc_id, markdown, date_str)
-            if ok:
-                url = f"https://docs.google.com/document/d/{doc_id}/edit"
-                return {
-                    "method": "google_api_update",
-                    "location": url,
-                    "success": True,
-                    "message": f"✅  Report written to Google Doc: {url}",
-                }
-
-        new_id = _create_new_doc(creds, markdown, date_str, folder_id or None)
-        if new_id:
-            url = f"https://docs.google.com/document/d/{new_id}/edit"
+    if creds is not None and candidates is not None and doc_id:
+        # Structured table format (preferred)
+        ok = _write_structured_report_to_doc(
+            creds, doc_id, candidates, daily_summary, date_str
+        )
+        if ok:
+            url = f"https://docs.google.com/document/d/{doc_id}/edit"
             return {
-                "method": "google_api_create",
+                "method": "google_api_structured",
                 "location": url,
                 "success": True,
-                "message": f"✅  New Google Doc created: {url}",
+                "message": f"✅  Structured report written to Google Doc: {url}",
             }
 
-    # ── Try deprecated MCP fallback ────────────────────────────────────────
-    if is_gdrive_mcp_available():
+    if creds is not None and doc_id:
+        # Fallback: write raw markdown to the doc
+        from .formatter import _build_docs_markdown
         try:
-            result = asyncio.run(_try_mcp_create(markdown, date_str, folder_id or None))
-            if result:
-                return {
-                    "method": "gdrive_mcp",
-                    "location": result,
-                    "success": True,
-                    "message": f"✅  Report written via MCP: {result}",
-                }
-        except Exception:
-            pass
+            from googleapiclient.discovery import build
+            service = build("docs", "v1", credentials=creds, cache_discovery=False)
+            doc = service.documents().get(documentId=doc_id).execute()
+            end_idx = doc["body"]["content"][-1].get("endIndex", 2) - 1
+            reqs: List[dict] = []
+            if end_idx > 1:
+                reqs.append({"deleteContentRange": {"range": {"startIndex": 1, "endIndex": end_idx}}})
+            reqs.append({"insertText": {"location": {"index": 1}, "text": markdown}})
+            service.documents().batchUpdate(documentId=doc_id, body={"requests": reqs}).execute()
+            url = f"https://docs.google.com/document/d/{doc_id}/edit"
+            return {
+                "method": "google_api_markdown",
+                "location": url,
+                "success": True,
+                "message": f"✅  Report written to Google Doc: {url}",
+            }
+        except Exception as exc:
+            logger.error("google_docs.markdown_write_failed: %s", exc)
 
-    # ── Local file fallback ────────────────────────────────────────────────
+    # Local file fallback
     path = _write_local_fallback(markdown, run_date)
-
     log.warning(
-        "google_docs.no_auth",
+        "google_docs.no_auth_fallback",
         local_file=str(path),
-        hint=(
-            "Add one of these to Cursor Secrets to enable Google Docs writing:\n"
-            "  GOOGLE_SERVICE_ACCOUNT_JSON  (base64 service-account JSON)\n"
-            "  GOOGLE_OAUTH_REFRESH_TOKEN + GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET\n"
-            "See src/reporting/google_docs.py for step-by-step setup."
-        ),
+        hint="Add GOOGLE_SERVICE_ACCOUNT_JSON to Cursor Secrets for permanent access.",
     )
     return {
         "method": "local_file",
         "location": str(path),
         "success": True,
         "message": (
-            f"⚠️  No Google credentials found — report saved locally: {path}\n"
-            f"    Add GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_OAUTH_REFRESH_TOKEN\n"
-            f"    to Cursor Secrets to enable Google Docs writing."
+            f"⚠️  No Google credentials — saved locally: {path}\n"
+            f"    Add GOOGLE_SERVICE_ACCOUNT_JSON or GMAIL_APP_PASSWORD to Cursor Secrets."
         ),
     }
