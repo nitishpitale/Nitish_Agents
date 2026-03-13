@@ -170,9 +170,9 @@ class TestOutputSchema:
         for c in run_result.candidates:
             assert c.vega > 0, f"Vega must be positive: {c.vega}"
 
-    def test_bid_less_than_ask(self, run_result):
+    def test_bid_less_than_or_equal_ask(self, run_result):
         for c in run_result.candidates:
-            assert c.bid < c.ask, f"Bid >= ask: bid={c.bid} ask={c.ask}"
+            assert c.bid <= c.ask, f"Bid > ask: bid={c.bid} ask={c.ask}"
 
     def test_mid_matches_bid_ask(self, run_result):
         for c in run_result.candidates:

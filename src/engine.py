@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Union
 import structlog
 
 from .config.settings import Settings, get_settings
-from .ingest.etoro_client import EToroClient
+from .ingest.etoro_client import EToroClient, HybridEToroClient
 from .ingest.mock_client import MockEToroClient
 from .ingest.models import HistoricalPrices, OptionContract
 from .llm.rationale import LLMProvider, generate_daily_summary, generate_rationale
@@ -205,7 +205,8 @@ def run_engine(
             )
             client = MockEToroClient(reference_date=as_of)
         else:
-            client = EToroClient(settings.etoro)
+            # HybridEToroClient: live eToro spot + yfinance history + synthetic chains
+            client = HybridEToroClient(settings.etoro)
 
     # --- Ingest ---
     all_contracts: List[OptionContract] = []
