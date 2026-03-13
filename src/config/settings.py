@@ -90,13 +90,20 @@ class APIConfig(BaseModel):
 
 
 class SchedulerConfig(BaseModel):
-    enabled: bool = False
-    cron: str = "0 18 * * 1-5"
+    enabled: bool = True
+    cron: str = "30 15 * * 1-5"   # 7:30 AM PST (Mon–Fri)
 
 
 class PersistenceConfig(BaseModel):
     results_dir: str = "./data/results"
     run_hashes_file: str = "./data/run_hashes.json"
+
+
+class ReportingConfig(BaseModel):
+    top_n: int = 5
+    gdrive_doc_id: str = ""
+    gdrive_folder_id: str = ""
+    local_reports_dir: str = "./data/reports"
 
 
 class NewsConfig(BaseModel):
@@ -138,6 +145,7 @@ class Settings(BaseModel):
     scheduler: SchedulerConfig = SchedulerConfig()
     persistence: PersistenceConfig = PersistenceConfig()
     news: NewsConfig = NewsConfig()
+    reporting: ReportingConfig = ReportingConfig()
 
     @classmethod
     def from_yaml_and_env(cls) -> "Settings":
@@ -183,6 +191,7 @@ class Settings(BaseModel):
             scheduler=SchedulerConfig(**raw.get("scheduler", {})),
             persistence=PersistenceConfig(**raw.get("persistence", {})),
             news=_build_news_config(raw, os.getenv("OPENAI_API_KEY", "")),
+            reporting=_build_reporting_config(raw),
         )
 
 
@@ -230,6 +239,13 @@ def _build_news_config(raw: dict, openai_api_key: str = "") -> NewsConfig:
     news_raw["llm_provider"] = os.getenv("NEWS_LLM_PROVIDER", llm_prov)
 
     return NewsConfig(**news_raw)
+
+
+def _build_reporting_config(raw: dict) -> ReportingConfig:
+    rep_raw = dict(raw.get("reporting", {}))
+    rep_raw["gdrive_doc_id"] = os.getenv("GDRIVE_DOC_ID", rep_raw.get("gdrive_doc_id", ""))
+    rep_raw["gdrive_folder_id"] = os.getenv("GDRIVE_FOLDER_ID", rep_raw.get("gdrive_folder_id", ""))
+    return ReportingConfig(**rep_raw)
 
 
 @lru_cache(maxsize=1)

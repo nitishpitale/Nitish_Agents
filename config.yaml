@@ -78,8 +78,24 @@ api:
   workers: 1
 
 scheduler:
-  enabled: false
-  cron: "0 18 * * 1-5"  # 18:00 UTC on market days (Mon-Fri)
+  enabled: true
+  # 7:30 AM PST = 15:30 UTC (standard time).
+  # For PDT (daylight saving Mar–Nov) the true UTC equivalent is 14:30.
+  # Override via SCHEDULER_CRON env var if needed.
+  cron: "30 15 * * 1-5"
+
+# ─── Reporting ───────────────────────────────────────────────────────────────
+reporting:
+  top_n: 5
+  # Google Drive integration (via Google Drive MCP).
+  # Set GDRIVE_DOC_ID to write to an existing Google Doc.
+  # Set GDRIVE_FOLDER_ID to create a new doc per day in a specific folder.
+  # If neither is set, a new doc is created in Drive root each day.
+  # Leave empty to disable Google Docs (reports saved locally instead).
+  gdrive_doc_id: ""     # injected via GDRIVE_DOC_ID env var
+  gdrive_folder_id: ""  # injected via GDRIVE_FOLDER_ID env var
+  # Local fallback directory (used when Google Drive MCP is not connected)
+  local_reports_dir: "./data/reports"
 
 persistence:
   results_dir: "./data/results"

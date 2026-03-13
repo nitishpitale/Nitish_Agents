@@ -23,6 +23,8 @@ from pydantic import BaseModel, Field
 
 from ..config.settings import Settings, get_settings
 from ..engine import RunResult, run_engine
+from ..reporting.formatter import format_daily_report
+from ..reporting.google_docs import write_report_to_docs
 
 log = structlog.get_logger(__name__)
 
@@ -58,6 +60,16 @@ class HealthResponse(BaseModel):
     last_run_candidates: Optional[int]
     uptime_seconds: float
     version: str
+    schedule: str
+    gdrive_connected: bool
+
+
+class ReportResponse(BaseModel):
+    method: str
+    location: str
+    success: bool
+    message: str
+    console_preview: str
 
 
 # ---------------------------------------------------------------------------
@@ -190,28 +202,70 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         raise HTTPException(status_code=404, detail=f"Candidate {candidate_id!r} not found")
 
     # ------------------------------------------------------------------
+    # POST /report  — generate report for last run + write to Google Docs
+    # ------------------------------------------------------------------
+
+    @app.post("/report", response_model=ReportResponse, summary="Generate & write daily report to Google Docs")
+    async def generate_report(
+        top_n: int = Query(5, ge=1, le=20, description="Number of candidates to include"),
+    ):
+        global _last_run
+        if _last_run is None:
+            raise HTTPException(status_code=404, detail="No run found. POST /run first.")
+
+        try:
+            reports = format_daily_report(
+                candidates=_last_run.candidates,
+                run_date=_last_run.run_date,
+                top_n=top_n,
+                daily_summary=_last_run.daily_summary,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Format failed: {exc}")
+
+        import os
+        doc_id = os.getenv("GDRIVE_DOC_ID", settings.reporting.gdrive_doc_id) or None
+        folder_id = os.getenv("GDRIVE_FOLDER_ID", settings.reporting.gdrive_folder_id) or None
+
+        result_doc = write_report_to_docs(
+            markdown=reports["google_docs_markdown"],
+            run_date=_last_run.run_date,
+            doc_id=doc_id,
+            folder_id=folder_id,
+        )
+
+        return ReportResponse(
+            method=result_doc["method"],
+            location=result_doc["location"],
+            success=result_doc["success"],
+            message=result_doc["message"],
+            console_preview=reports["console_text"],
+        )
+
+    # ------------------------------------------------------------------
     # GET /health
     # ------------------------------------------------------------------
 
     @app.get("/health", response_model=HealthResponse, summary="Health check")
     async def health():
+        import shutil
         uptime = time.monotonic() - _app_start_time
+        base = dict(
+            status="ok",
+            uptime_seconds=round(uptime, 1),
+            version=settings.app_version,
+            schedule=f"07:30 PST Mon–Fri ({settings.scheduler.cron} UTC)",
+            gdrive_connected=bool(shutil.which("npx")),
+        )
         if _last_run:
             return HealthResponse(
-                status="ok",
                 last_run_id=_last_run.run_id,
                 last_run_date=_last_run.run_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 last_run_candidates=len(_last_run.candidates),
-                uptime_seconds=round(uptime, 1),
-                version=settings.app_version,
+                **base,
             )
         return HealthResponse(
-            status="ok",
-            last_run_id=None,
-            last_run_date=None,
-            last_run_candidates=None,
-            uptime_seconds=round(uptime, 1),
-            version=settings.app_version,
+            last_run_id=None, last_run_date=None, last_run_candidates=None, **base
         )
 
     return app
