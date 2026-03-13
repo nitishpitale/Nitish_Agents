@@ -31,3 +31,5 @@ data/
 # Secrets (never commit)
 .env
 *.env
+data/.google_token.json
+*.google_token.json

@@ -153,6 +153,42 @@ def _build_credentials():
         except Exception as exc:
             logger.error("google_auth: access token failed: %s", exc)
 
+    # ── 5. Persisted token file (.google_token.json) ───────────────────────
+    token_file = Path(os.getenv("GOOGLE_TOKEN_FILE", "data/.google_token.json"))
+    if token_file.exists():
+        try:
+            with open(token_file) as f:
+                token_data = json.load(f)
+            stored_refresh = token_data.get("refresh_token", "")
+            stored_client_id = token_data.get("client_id", os.getenv("GOOGLE_OAUTH_CLIENT_ID", _PLAYGROUND_CLIENT_ID))
+            stored_client_secret = token_data.get("client_secret", os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", ""))
+            if stored_refresh and stored_client_secret:
+                creds = Credentials(
+                    token=token_data.get("access_token"),
+                    refresh_token=stored_refresh,
+                    token_uri="https://oauth2.googleapis.com/token",
+                    client_id=stored_client_id,
+                    client_secret=stored_client_secret,
+                    scopes=_SCOPES,
+                )
+                if not creds.valid:
+                    creds.refresh(Request())
+                # Persist refreshed token
+                token_data["access_token"] = creds.token
+                with open(token_file, "w") as f:
+                    json.dump(token_data, f)
+                log.info("google_auth.using_token_file", path=str(token_file))
+                return creds
+            elif stored_refresh:
+                # No client secret — use access token from file if present
+                stored_access = token_data.get("access_token", "")
+                if stored_access:
+                    creds = Credentials(token=stored_access, scopes=_SCOPES)
+                    log.info("google_auth.using_token_file_access_only", path=str(token_file))
+                    return creds
+        except Exception as exc:
+            logger.warning("google_auth: token file load failed: %s", exc)
+
     return None
 
 
@@ -364,11 +400,13 @@ def is_gdrive_mcp_available() -> bool:
 
 def is_google_api_available() -> bool:
     """Return True if any Google auth method is configured."""
+    token_file = Path(os.getenv("GOOGLE_TOKEN_FILE", "data/.google_token.json"))
     return bool(
         os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
         or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
         or (os.getenv("GOOGLE_OAUTH_REFRESH_TOKEN") and os.getenv("GOOGLE_OAUTH_CLIENT_SECRET"))
         or os.getenv("GOOGLE_ACCESS_TOKEN")
+        or token_file.exists()
     )
 
 

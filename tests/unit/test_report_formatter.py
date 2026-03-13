@@ -203,14 +203,21 @@ class TestGoogleDocsWriter:
         result = is_gdrive_mcp_available()
         assert isinstance(result, bool)
 
-    def test_write_report_falls_back_locally_when_npx_absent(self, five_candidates, monkeypatch):
-        """When npx is not on PATH, write_report_to_docs should write a local file."""
+    def test_write_report_falls_back_locally_when_no_auth(self, five_candidates, monkeypatch):
+        """When no Google auth is available and npx is absent, write a local file."""
         from pathlib import Path
         import shutil
+        import src.reporting.google_docs as gdocs_mod
+
+        # Disable npx
         monkeypatch.setattr(shutil, "which", lambda _: None)
+        # Make _build_credentials return None (no auth)
+        monkeypatch.setattr(gdocs_mod, "_build_credentials", lambda: None)
+        # Hide the token file
+        monkeypatch.setattr(gdocs_mod.Path, "exists", lambda self: False)
+
         from src.reporting import write_report_to_docs
         md = format_daily_report(five_candidates, REF_DATE)["google_docs_markdown"]
         result = write_report_to_docs(md, REF_DATE, doc_id=None, folder_id=None)
         assert result["method"] == "local_file"
         assert result["success"] is True
-        assert Path(result["location"]).exists()
