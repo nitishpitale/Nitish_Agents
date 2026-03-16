@@ -64,6 +64,16 @@ jobs:
           GMAIL_TO: ${{ secrets.GMAIL_TO }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
 
+          # ── Free permanent channels (add any/all) ──────────────────
+          # Telegram (30-second setup, phone notification)
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Discord (1-minute setup, rich formatted report)
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # GitHub Gist (2-minute setup, versioned markdown)
+          GITHUB_GIST_TOKEN: ${{ secrets.GITHUB_GIST_TOKEN }}
+          GITHUB_GIST_ID: ${{ secrets.GITHUB_GIST_ID }}
+
           # Optional: OpenAI for LLM rationale
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
@@ -78,6 +88,7 @@ jobs:
           from src.reporting.formatter import format_daily_report
           from src.reporting.google_docs import write_report_to_docs, is_google_api_available
           from src.reporting.email_reporter import send_daily_report, is_email_configured
+          from src.reporting.free_delivery import dispatch_free_channels
 
           # Parse optional tickers override from workflow_dispatch input
           tickers_input = os.getenv("INPUT_TICKERS", "").strip()
@@ -127,6 +138,18 @@ jobs:
               print(email_result['message'])
               if email_result['success']:
                   dispatched.append('email')
+
+          # Free channels: Telegram, Discord, GitHub Gist
+          free = dispatch_free_channels(
+              candidates=result.candidates,
+              run_date=result.run_date,
+              markdown=reports['google_docs_markdown'],
+              daily_summary=result.daily_summary,
+          )
+          for r in free:
+              print(r['message'])
+              if r['success']:
+                  dispatched.append(r['method'])
 
           print(f"\nDispatched to: {dispatched if dispatched else ['local file only']}")
           if not dispatched:

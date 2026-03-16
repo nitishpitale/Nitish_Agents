@@ -29,6 +29,7 @@ from ..engine import run_engine
 from ..reporting.formatter import format_daily_report
 from ..reporting.google_docs import write_report_to_docs
 from ..reporting.email_reporter import send_daily_report, is_email_configured
+from ..reporting.free_delivery import dispatch_free_channels
 
 log = structlog.get_logger(__name__)
 
@@ -178,6 +179,18 @@ def _scheduled_run(settings: Settings) -> None:
                 dispatched.append("email")
         except Exception as exc:
             log.error("scheduler.email_failed", error=str(exc))
+
+    # ── 3. Free channels (Telegram, Discord, GitHub Gist) ────────────────
+    free_results = dispatch_free_channels(
+        candidates=result.candidates,
+        run_date=result.run_date,
+        markdown=reports["google_docs_markdown"],
+        daily_summary=result.daily_summary,
+    )
+    for r in free_results:
+        print(r["message"])
+        if r["success"]:
+            dispatched.append(r["method"])
 
     if dispatched:
         log.info("scheduler.dispatch_complete", outputs=dispatched)
