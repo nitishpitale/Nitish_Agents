@@ -1,0 +1,144 @@
+name: Daily Volatility Picks — 7:30 AM PST
+
+# Runs every weekday at 15:30 UTC (= 7:30 AM PST / 8:30 AM PDT)
+on:
+  schedule:
+    - cron: "30 15 * * 1-5"   # Mon–Fri 15:30 UTC  (7:30 AM PST)
+    - cron: "30 14 * * 1-5"   # Mon–Fri 14:30 UTC  (7:30 AM PDT, Mar–Nov)
+
+  # Also allow manual trigger from GitHub Actions tab
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "Comma-separated tickers (leave blank for full universe)"
+        required: false
+        default: ""
+
+jobs:
+  run-picks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python ─────────────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # ── 3. Install dependencies ──────────────────────────────────────────
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 4. Create data directories ───────────────────────────────────────
+      - name: Create data dirs
+        run: mkdir -p data/results data/news_cache data/reports
+
+      # ── 5. Run engine + write to Google Doc ──────────────────────────────
+      - name: Run daily picks and write to Google Doc
+        env:
+          # eToro live API credentials
+          ETORO_API_KEY: ${{ secrets.ETORO_API_KEY }}
+          ETORO_USER_KEY: ${{ secrets.ETORO_USER_KEY }}
+          ETORO_USE_MOCK: "false"
+
+          # Google Docs — ONE of the following auth methods:
+          # Option A (recommended): Service Account — never expires
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          # Option B: OAuth refresh token
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+
+          # Google Doc + Folder IDs (already hardcoded in config.yaml too)
+          GDRIVE_DOC_ID: "1ZcLBIM7rEY3z-e8AQxibxijHvf5FajNeEUyvFT3RLTk"
+          GDRIVE_FOLDER_ID: "1IuCUos6M0rWmLB6DxP8MxdbVtaEeQ1_P"
+
+          # Optional: email delivery (Gmail App Password — never expires)
+          GMAIL_FROM: ${{ secrets.GMAIL_FROM }}
+          GMAIL_TO: ${{ secrets.GMAIL_TO }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+
+          # Optional: OpenAI for LLM rationale
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+          PYTHONPATH: "."
+
+        run: |
+          python3 - << 'PYEOF'
+          import os
+          from datetime import datetime, timezone
+          from src.config.settings import get_settings
+          from src.engine import run_engine
+          from src.reporting.formatter import format_daily_report
+          from src.reporting.google_docs import write_report_to_docs, is_google_api_available
+          from src.reporting.email_reporter import send_daily_report, is_email_configured
+
+          # Parse optional tickers override from workflow_dispatch input
+          tickers_input = os.getenv("INPUT_TICKERS", "").strip()
+          if tickers_input:
+              tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+          else:
+              tickers = ['AAPL','MSFT','AMZN','GOOGL','TSLA','NVDA','META','SPY','QQQ','IWM']
+
+          print(f"Running picks for: {tickers}")
+          print(f"Google API available: {is_google_api_available()}")
+          print(f"Email configured: {is_email_configured()}")
+
+          settings = get_settings()
+          result = run_engine(tickers=tickers, force_rerun=True)
+
+          reports = format_daily_report(
+              candidates=result.candidates,
+              run_date=result.run_date,
+              top_n=5,
+              daily_summary=result.daily_summary,
+          )
+
+          print(reports['console_text'])
+
+          dispatched = []
+
+          # Write to Google Doc
+          doc_result = write_report_to_docs(
+              markdown=reports['google_docs_markdown'],
+              run_date=result.run_date,
+              doc_id=os.getenv('GDRIVE_DOC_ID'),
+              folder_id=os.getenv('GDRIVE_FOLDER_ID'),
+              candidates=result.candidates,
+              daily_summary=result.daily_summary,
+          )
+          print(doc_result['message'])
+          if doc_result['success'] and doc_result['method'] != 'local_file':
+              dispatched.append('google_docs')
+
+          # Send email (if configured)
+          if is_email_configured():
+              email_result = send_daily_report(
+                  markdown=reports['google_docs_markdown'],
+                  plain_text=reports['plain_text'],
+                  run_date=result.run_date,
+              )
+              print(email_result['message'])
+              if email_result['success']:
+                  dispatched.append('email')
+
+          print(f"\nDispatched to: {dispatched if dispatched else ['local file only']}")
+          if not dispatched:
+              print("⚠️  No delivery method worked — add secrets to GitHub repo settings")
+              raise SystemExit(1)
+          PYEOF
+
+      # ── 6. Upload local report as artifact (always, as backup) ───────────
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: daily-picks-${{ github.run_id }}
+          path: data/reports/
+          retention-days: 30
